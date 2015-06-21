@@ -1,0 +1,269 @@
+---
+title: Recognition and Classification of the Quality of Human Activity using Random Forests.
+author: "Mashudu"
+date: "Sunday, June 21, 2015"
+output: html_document
+---
+
+## Summary
+
+Using a dataset of 152 collected and calculated features from 4 human activity monitors worn by 6 individuals, we use a random forest algorytm with cross validation to propose a model for classifying a given activity, barbell lifts, according to 1 of 5 qualitative classes which represent 1 correct and 4 distinct incorrect ways of performing the exercise.
+
+This analysis shows that the quality with which the same activity is performed can be classified accurately using a random forest algorythm with 4-fold cross-validation. The optimal model selected using training set accurracy chose 19 features at each split in each tree. This final model returns an OOB estimate of the error rate of 1.62% which stabilized with random forests of 51 trees. Accuracy of 98.93% was achieved on an independent dataset held out during model training. 
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this analysis, we use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. The section on the Weight Lifting Exercise Dataset, on the dataset author's website has the following information:  
+
+>The approach we propose for the Weight Lifting Exercises dataset is to investigate "how (well)" an activity was performed by the wearer. The "how (well)" investigation has only received little attention so far, even though it potentially provides useful information for a large variety of applications,such as sports training.  
+>
+we first define quality of execution and investigate three aspects that pertain to qualitative activity recognition: the problem of specifying correct execution, the automatic and robust detection of execution mistakes, and how to provide feedback on the quality of execution to the user. 
+>
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+>
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience. We made sure that all participants could easily simulate the mistakes in a safe and controlled manner by using a relatively light dumbbell (1.25kg).
+
+## Data Processing
+
+You can download the training dataset [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv).
+
+Further information and data about the original experiment can be found at the data author's website [here](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises)
+
+
+The following code downloads, loads and using package _caret_ splits the training dataset into a model training part (70%) and a part to validate the final model with (30%). The data consists 160 features: 7 features that identify the exercise participant, the UTC date and time the activity was recorded, and the time shift window used for summarizing contiguous samples/activity records. 152 features collected from the sensors or calculated from sensor data using the time windows. 1 outcome feature, named "classe" identifies the class of activity (A,B,C,D or E) that the participant was performing at that point in time.  
+
+```{r data_processing1, cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+## download the data
+if(!file.exists("pml-training.csv")) {
+    download.file(train_url, "pml-training.csv")
+}
+if(!file.exists("pml-testing.csv"))  {
+    download.file(test_url,  "pml-testing.csv")
+}
+
+## load the training dataset
+train <- read.csv(file = "pml-training.csv", header = TRUE, sep = ",")
+# object.size(train)
+
+## partition loaded training dataset into a training and validation set
+set.seed(538)
+library(caret, quietly = T, warn.conflicts = F)
+inTrain <- createDataPartition(y = train$classe, p = 0.7, list = F)
+wle_train <- train[inTrain,]
+wle_validation <- train[-inTrain,]
+rm(train)
+```
+
+```{r data_processing2, cache=TRUE, warning=FALSE, message=FALSE, results='hide', echo=F}
+
+## explore columns of wle_train and create a feature summary data.frame
+    table(sapply(wle_train, class))
+    # change har features (col 8:159) loaded as class "factor" to "numeric" 
+    for (i in 8:(dim(wle_train)[2]-1)) {
+        wle_train[,i] <- as.numeric(as.character(wle_train[,i]))
+    }
+
+    # create feature_info to capture feature summary starting with class and identify NA's
+    feature_info <- data.frame(cbind(colnames(wle_train),
+                                     sapply(X = wle_train, FUN = class), 
+                                     round(colSums(is.na(wle_train))*100/dim(wle_train)[1],
+                                           digits = 1)),
+                               stringsAsFactors = FALSE)
+
+    # check which features have little or no variability & add this to feature_info
+    nzv <- nearZeroVar(wle_train, saveMetrics= TRUE)
+    feature_info <- cbind(feature_info, nzv[,c(1,2,4)])
+    
+    # create logical vector for features with NA values & add this to feature_info
+    feature_info <- cbind(feature_info, 
+                          feature_info[,3] > 0)
+
+    # check which features are highly correlated with multiple & add this to feature_info
+    wle_cor <-  cor(wle_train[,8:159], use = "pairwise.complete.obs")
+    wle_cor[is.na(wle_cor)] <- 0 # remove NA's from correlation matrix
+
+        # find features that are highly correlated with other features
+        highlyCorDescr80 <- findCorrelation(x = wle_cor, cutoff = .80, verbose = F)
+        highlyCorDescr80 <- highlyCorDescr80 + 7 # move indexes to match training set
+        v1 <- 1:160; highlyCorDescr80 <- v1[v1 %in% highlyCorDescr80] # reorder
+
+        # create logical vector of highly correlated features & add to feature_info
+        highly_correlated <- v1 %in% highlyCorDescr80 
+        feature_info <- cbind(feature_info, highly_correlated)
+    
+    # rename feature_info columns
+    colnames(feature_info) <- c("features", "class", "percent_NA", "frequency_ratio", 
+                                "percent_unique", "near_zero_var", "has_NA", 
+                                "highly_correlated")
+
+```
+Creating a data frame called *feature_info* (the code is available in the R Markdown file) from our training partition of 13737 records/acitivity samples, we can look at which features are not likely to contribute to our classification model. We identify 37 features most likely to contribute to the model because they have no missing values (features with missing values were missing 98% of values or more), don't lack variablity and are not highly correlated (absolute cut-off of 0.8 used) with the rest of the dataset features.
+
+```{r data_processing3}
+## select features to keep that are not highly correlated, lack variability or mostly NA
+    
+table(feature_info[,6]) # features have near zero variance
+table(feature_info[,7]) # features have missing values
+table(feature_info[,8]) # features are highly correlated with many features
+
+# table(feature_info[,c(6:8)])
+
+# how many features don't contain NA's, have variability and are not highly correlated with the feature set
+sum(feature_info[6] == F & feature_info[7] == F & feature_info[8] == F)
+
+## keep features which don't contain NA's, have variability and are not highly correlated with the feature set
+keep_features <- which(feature_info[6] == F & feature_info[7] == F & feature_info[8] == F)
+wle_train <- wle_train[,(keep_features)]
+wle_train <- wle_train[,-c(1:6)]
+```
+
+## Model selection
+
+Random Forests are a good choice to classify data with a large number of features 
+accurately where no known or simple linear relationship can be proposed without 
+further information to suggest a hypothesis. Random forests also provide THAT further 
+information by identifying the features that are important to deciding classification 
+accurately.  
+
+We use Random Forests here in combination with cross-validation to explore and accurately 
+classify this activity data by "classe"  
+
+First the _randomForest_ package is loaded and a random seed set so results are reproducible. 
+We create a training control that that will use 4-fold cross-validation and use the same 
+random seed to keep the results reproducible every time this model is built.
+
+```{r model_building1, results='hide', message=F}
+## fit a random forests model
+library(randomForest, quietly = T, warn.conflicts = F)
+
+# set the seeds for the training controls so results are reproducible
+set.seed(538)
+seeds <- vector(mode = "list", length = 5)
+for(i in 1:4) seeds[[i]]<- sample.int(n=999, 3)
+seeds[[5]]<-sample.int(999, 1)
+# the seed object should be a list of length 5 with 4 integer vectors of size 3 
+# and the last list element having a single integer
+
+# set the training model controls
+library(caret, quietly = T, warn.conflicts = F)
+train_control <- trainControl(method = "cv", number = 4, seeds = seeds)
+```
+
+For a baseline we check what forests with 21 trees and no cross-vaidation show versus forests with 21 trees and cross-validation:  
+```{r model_building2, results='hide', message=F, cache=T}
+# no cross-validation & 21 trees
+fit_rf1 <- train(classe ~ ., data = wle_train, method = "rf", importance = T, 
+                 ntree = 21, trControl = trainControl(method = "oob", seeds = 538))
+# cross-validation & 21 trees
+set.seed(538)
+fit_rf2 <- train(classe ~ ., data = wle_train, method = "rf", importance = T, 
+                 ntree = 21, trControl = train_control)
+```
+
+The `r fit_rf1$finalModel$ntree` tree model without cross-validation already performs well achieving an OOB estimate for the error rate of 2.24%
+```{r model_building3a, echo=F, message=F}
+# model performance for 21 tree random forests without cross-validation
+fit_rf1
+print(fit_rf1$finalModel)
+```
+
+The `r fit_rf2$finalModel$ntree` tree model with cross-validation achieves an OOB estimate for the error rate of 2.49% and provides standard deviations for the OOB estimated error rate which the model without cross-validation does not. However a plot of the OOB estimated error-rate shows it has not stabilized yet and that more than 21 trees will likely produce a lower OOB estimate of the error rate.   
+```{r model_building3b, echo=F, message=F}
+# model performance for 21 tree random forests with cross-validation
+fit_rf2
+print(fit_rf2$finalModel)
+plot(fit_rf2$finalModel, main = "Overall and Within Class OOB Error Rates on Training Set 
+            using Random Forests with 1 to 21 trees")
+```
+
+So we proceed to a cross-validated random forests model with 51 trees: 
+```{r model_building3c, results='hide', message=F, cache=T} 
+# random forests with 51 trees and cross-validation
+fit_rf3 <- train(classe ~ ., data = wle_train, method = "rf", importance = T, 
+                 ntree = 51, trControl = train_control)
+```
+
+This `r fit_rf3$finalModel$ntree` tree model is the final model we decided on as the OOB estimate of error-rate has settled graphically as seen in the OOB plot vs number of trees in the plot below. The OOB estimate of error-rate is 1.62%. The best within training Accuracy of 98.3% for this model is acheived with `r fit_rf2$finalModel$mtry` features selected at each node. The 21 tree models also achieved the highest accuracy with 19 features selected at each node.  
+```{r model_building4, echo=F, message=F, cache=T}
+# model performance for 51 tree random forests with cross-validation
+fit_rf3
+print(fit_rf3$finalModel)
+```
+
+The Variable Importance for 25 of the 37 features that stand out most in the final model is ploted in two plots below. The feature that apears most important using the *Mean Decrease in Accuracy* when it is omitted is belt sensor pitch (*pitch_belt*). The feature that apears most important using the *Mean Decrease in Gini Impurity* is the dumbbell magnetometer on the Z vector (*magnet__dumbbell_z*) with belt sensor pitch second.  
+```{r model_building5, echo=F, message=F, cache=T}
+
+## create data frame of extracted OOB values for all forest sizes (max = 91 trees)
+OOB <- cbind(1:as.numeric(fit_rf3$finalModel[13]), data.frame(fit_rf3$finalModel[4])) 
+colnames(OOB) <- c("number_of_trees", "OOB", "error_rate_A", "error_rate_B", 
+                   "error_rate_C", "error_rate_D", "error_rate_E")
+library(reshape2)
+OOB <- melt(OOB, id=c("number_of_trees"))
+colnames(OOB) <- c("number_of_trees", "class", "error_rate")
+
+## plot OOB error rate vs forest size to check selected forest size is sufficient 
+library(ggplot2)
+OOB_plot <- ggplot(OOB, aes(x=number_of_trees, y=error_rate, colour=class, group=class)) +
+    geom_line() +
+    ggtitle("Overall and Within Class OOB Error Rates on Training Set 
+            using Random Forests with 1 to 51 trees")
+OOB_plot
+# Variable Importance Plots
+varImpPlot(x = fit_rf3$finalModel, type = 1, n.var = 25, pch = 19, col = 1, cex = 1,
+           main = "Relative Importance of the Top Features indentified 
+           using the Mean Decrease In Accuracy")
+varImpPlot(x = fit_rf3$finalModel, type = 2, n.var = 25, pch = 19, col = 1, cex = 1,
+           main = "Relative Importance of the Top Features identified
+           using the Mean Decrease In Gini Impurity")
+```
+
+
+## Results
+
+Validation of the final model on a set of 5885 samples/activity records kept out of training 
+whe the the original dataset was split, produces the following performance output:  
+```{r model_validation, echo=F, message=F, cache=T}
+
+wle_validation <- wle_validation[,(keep_features)]
+wle_validation <- wle_validation[,-c(1:6)]
+
+## assess final model performance on the validation dataset
+validation_prediction <- predict(object = fit_rf3, newdata = wle_validation)
+
+confusionMatrix(data = validation_prediction, reference = wle_validation$classe)
+```
+
+Thus an out of training sample Accuracy of 98.93% or 0.9893 with a 95% Confidence Interval 
+of 0.9863 to 0.9918 and a predicited out of sample error rate of 
+`r round(1-sum(validation_prediction == wle_validation$classe)/length(validation_prediction), 4)` or 
+1.07% is produced using a cross-validated random forests model of 51 trees and 19 features at each node. 
+
+The predicted "classe" for the 20 samples for which "classe" is unknown are calculated, listed and filed 
+for upload below:  
+```{r model_test, echo=F, message=F, cache=T}
+
+## reduce the test dataset to the features selected for the final model
+wle_test <- read.csv(file = "pml-testing.csv", header = TRUE, sep = ",")
+wle_test <- wle_test[,(keep_features)]
+wle_test <- wle_test[,-c(1:6,44)]
+
+## calculate predicited outcome classe for test samples
+test_prediction <- predict(object = fit_rf3, newdata = wle_test)
+test_prediction
+
+## create directory to store test answers
+if(!file.exists("answers"))  {
+    dir.create("answers")
+}
+
+## function to create files with the predicted class for the 20 test samples
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("answers/","problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+pml_write_files(test_prediction)
+```
